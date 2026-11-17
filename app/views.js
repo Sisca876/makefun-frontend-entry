@@ -3,13 +3,25 @@
 // are rewritten, new rows slide in, gone rows leave. No full re-render, so a
 // live refresh never steals scroll position, focus, or a text selection.
 
-import { bytes, date, esc, money, moneyShort, ms, num, timeLeft, winRate } from './fmt.js';
+import { setViewStats } from './api.js';
+import { bytes, date, dateShort, esc, money, moneyShort, ms, num, ord, relTime, timeLeft, winRate } from './fmt.js';
 
 /** The reward as it stands now: the prize plus any entry fees paid into it. */
 const pot = (b) => Number(b.potUsd ?? b.rewardAmount ?? 0);
 
+/** The starter-kit download URL: the API sends kit as {json, tarball, final}. */
+function kitHref(b) {
+  const kit = b.kit;
+  const path = typeof kit === 'string' ? kit : (kit?.tarball || kit?.json || '');
+  if (!path) return '';
+  return /^https?:\/\//.test(path) ? path : `https://make.fun${path.startsWith('/') ? '' : '/'}${path}`;
+}
+
+/** Whether a bounty charges an entry fee (the API stores it as a string). */
+const hasFee = (b) => Number(b.entryFeeUsd) > 0;
+
 /** Re-render a keyed list without rebuilding it. `tag` is the row element. */
-export function patchList(container, items, { tag, key, html, sig, visible }) {
+export function patchList(container, items, { tag, key, html, sig, visible, attrs }) {
   const seen = new Set();
   for (const item of items) {
     const k = key(item);
@@ -29,6 +41,12 @@ export function patchList(container, items, { tag, key, html, sig, visible }) {
         row._sig = s;
       }
       container.appendChild(row); // moves it into sorted order
+    }
+    if (attrs) {
+      for (const [name, value] of Object.entries(attrs(item))) {
+        if (value == null) row.removeAttribute(name);
+        else row.setAttribute(name, value);
+      }
     }
     row.hidden = visible ? !visible(item) : false;
   }
@@ -63,7 +81,7 @@ export function boardShell() {
     <div class="page-head">
       <p class="eyebrow"><span class="live-dot"></span>Live · every bounty, updating</p>
       <h1>Live bounty board</h1>
-      <p class="lede">Every bounty on make.fun, live from the public API. Type to filter · <kbd>/</kbd> search · <kbd>j</kbd>/<kbd>k</kbd> move.</p>
+      <p class="lede">Every bounty on make.fun, live from the public API, as one table. Type to filter · <kbd>/</kbd> search · <kbd>j</kbd>/<kbd>k</kbd> move. The <a href="#/">split board</a> shows the list beside a bounty's detail.</p>
     </div>
     <div class="controls" role="search">
       <input id="q" type="search" placeholder="Filter bounties…  ( / )" autocomplete="off" aria-label="Filter bounties">
@@ -103,11 +121,14 @@ export function sortBoard(items, sort) {
   return arr;
 }
 
-export function boardVisible(b, tab, q) {
+export function boardVisible(b, tab, q, category = '', fee = 'any') {
   const now = Date.now();
   if (tab === 'open' && b.status !== 'open') return false;
   if (tab === 'resolved' && b.status !== 'resolved') return false;
   if (tab === 'closing' && (b.status !== 'open' || new Date(b.deadline).getTime() - now > 86400000)) return false;
+  if (category && b.category !== category) return false;
+  if (fee === 'free' && hasFee(b)) return false;
+  if (fee === 'paid' && !hasFee(b)) return false;
   if (!q) return true;
   const hay = `${b.title} ${b.category || ''} ${(b.skills || []).join(' ')} ${b.slug}`.toLowerCase();
   return q.toLowerCase().split(/\s+/).every((w) => hay.includes(w));
@@ -147,6 +168,7 @@ export function bountyHTML(b) {
   const closing = left > 0 && left < 86400000;
   const feeValue = b.entryFeeUsd ? money(b.entryFeeUsd) : 'Free';
   const feeNote = b.entryFeeUsd && b.entryFeePayers ? `${num(b.entryFeePayers)} paid` : (b.entryFeeUsd ? 'per entry' : 'no entry fee');
+  const kit = kitHref(b);
   return `
     <p class="crumbs"><a href="#/">All bounties</a> › ${esc(b.category || 'Bounty')}</p>
     <div class="hero-block">
@@ -165,7 +187,7 @@ export function bountyHTML(b) {
     <div class="actions">
       <a class="btn" href="https://make.fun/bounty/${encodeURIComponent(b.slug)}" target="_blank" rel="noopener">Open on make.fun ↗</a>
       <a class="btn ghost" href="#/leaderboard/${encodeURIComponent(b.slug)}">Leaderboard (${num(b.submissionCount)})</a>
-      ${b.kit ? `<a class="btn ghost" href="${esc(b.kit)}" target="_blank" rel="noopener">Kit</a>` : ''}
+      ${kit ? `<a class="btn ghost" href="${esc(kit)}" target="_blank" rel="noopener">Kit</a>` : ''}
     </div>
     ${payoutRows(b)}
     <h2>About this bounty</h2>
@@ -295,6 +317,7 @@ export function mountLeaderboard(root, data, onSelect) {
     countEl.textContent = filtered.length === entries.length
       ? `${num(entries.length)} entries`
       : `${num(filtered.length)} of ${num(entries.length)} entries`;
+    setViewStats(filtered.length, Math.max(0, end - start));
   }
 
   scroll.addEventListener('scroll', () => requestAnimationFrame(render), { passive: true });
@@ -419,4 +442,342 @@ export function profileHTML(p, rankings) {
     ${solutions.length ? `<div class="table-wrap"><table class="board">
       <thead><tr><th>Entry</th><th>Place</th><th>Prize</th><th>Score</th><th>Entered</th></tr></thead>
       <tbody>${rows}</tbody></table></div>` : '<p class="empty">No entries yet.</p>'}`;
+}
+
+// ------------------------------------------------------------- split view ----
+// The default page: the bounty list stays on the left while the selected
+// bounty renders beside it, the way the best make.fun frontends lay it out.
+// Clicking a row swaps the detail pane without a reload and without losing
+// the list. Everything here is computed live from the public API; a field the
+// API does not expose is omitted, never invented.
+
+/** The aggregate strip above the list: live totals from the open board. */
+export function statsStripHTML(openItems) {
+  const live = openItems.length;
+  const pots = openItems.reduce((sum, b) => sum + pot(b), 0);
+  const entries = openItems.reduce((sum, b) => sum + (Number(b.submissionCount) || 0), 0);
+  const next = openItems
+    .map((b) => b.deadline)
+    .filter((d) => new Date(d).getTime() > Date.now())
+    .sort()[0];
+  return `
+    <div class="stat-strip" aria-label="Live totals">
+      <div><span class="ss-label">Live</span><span class="ss-value">${num(live)}</span></div>
+      <div><span class="ss-label">Live pots</span><span class="ss-value">${money(pots)}</span></div>
+      <div><span class="ss-label">Entries</span><span class="ss-value">${num(entries)}</span></div>
+      <div><span class="ss-label">Next deadline</span><span class="ss-value" data-countdown-short="${esc(next || '')}">${next ? timeLeft(next).replace(/ left$/, '') : '—'}</span></div>
+    </div>`;
+}
+
+/**
+ * The activity ticker. The board payload's embedded submissions carry times
+ * only — no names — so the ticker shows what is real: how many entries each
+ * open bounty took in the last hour, and how recently its newest entry
+ * landed. The hourly total carries a '+' when a competition's embedded list
+ * of 50 is cut off inside the hour, so the number is never claimed as exact
+ * when it is only a floor. No extra request: the times ride the board list.
+ */
+export function tickerHTML(openItems) {
+  const now = Date.now();
+  const hourAgo = now - 3600000;
+  let totalLastHour = 0;
+  let truncated = false;
+  const per = [];
+  for (const b of openItems) {
+    const subs = Array.isArray(b.submissions) ? b.submissions : [];
+    const times = subs
+      .map((s) => new Date(s.createdAt || s.created_at).getTime())
+      .filter(Number.isFinite);
+    if (!times.length) continue;
+    const cut = subs.length === 50 && Number(b.submissionCount) > 50 && Math.min(...times) > hourAgo;
+    if (cut) truncated = true;
+    const lastHour = times.filter((t) => t > hourAgo).length;
+    totalLastHour += lastHour;
+    per.push({ slug: b.slug, title: b.title, lastHour, last: Math.max(...times), cut });
+  }
+  if (!per.length) return '';
+  per.sort((a, b) => b.last - a.last);
+  const items = per.slice(0, 6).map((p) => {
+    const bit = p.lastHour > 0
+      ? `${num(p.lastHour)}${p.cut ? '+' : ''} in the last hour · last ${relTime(new Date(p.last).toISOString())}`
+      : `last entry ${relTime(new Date(p.last).toISOString())}`;
+    return `<a href="#/bounty/${encodeURIComponent(p.slug)}" data-prefetch="${esc(p.slug)}">${esc(p.title)} <span class="tk-when">${bit}</span></a>`;
+  }).join('<span class="tk-sep">·</span>');
+  return `
+    <div class="ticker" aria-label="Recent entries">
+      <span class="tk-live"><span class="live-dot"></span>Live</span>
+      <span class="tk-count">${num(totalLastHour)}${truncated ? '+' : ''} entries in the last hour</span>
+      <span class="tk-items">${items}</span>
+    </div>`;
+}
+
+export function splitRowHTML(b) {
+  const left = new Date(b.deadline).getTime() - Date.now();
+  const closing = left > 0 && left < 86400000;
+  const urgent = left > 0 && left < 3600000;
+  const ended = left <= 0;
+  const fees = Number(b.entryFeesUsd);
+  return `
+    <span class="srow-top">
+      <span class="srow-title">${esc(b.title)}</span>
+      ${closing && !ended ? '<span class="closing-badge">closing soon</span>' : ''}
+    </span>
+    <span class="srow-sub">${esc(b.category || '')}${b.skills?.length ? ` · ${esc(b.skills.slice(0, 2).join(', '))}` : ''}</span>
+    <span class="srow-meta">
+      <b>${moneyShort(pot(b))}</b>${Number.isFinite(fees) && fees > 0 ? `<span class="srow-fees">+${moneyShort(fees)} fees</span>` : ''}
+      ${hasFee(b) ? `<span class="fee sm">${money(b.entryFeeUsd)} fee</span>` : '<span class="free sm">free</span>'}
+      <span class="srow-due ${urgent ? 'urgent' : closing ? 'soon' : ended ? 'ended' : ''}" data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span>
+      <span class="srow-n">${num(b.submissionCount)} entries</span>
+    </span>`;
+}
+
+export function splitShell() {
+  return `
+    <div id="ticker-slot"></div>
+    <div class="split2">
+      <section class="pane-list" aria-label="Bounty board">
+        <div class="pane-head">
+          <p class="eyebrow"><span class="live-dot"></span>Live · every bounty, updating</p>
+          <h1 class="pane-title">Bounty board</h1>
+        </div>
+        <div id="split-stats"></div>
+        <div class="split-controls" role="search">
+          <div class="tabs" role="tablist" aria-label="Status">
+            <button role="tab" data-tab="open" aria-selected="true">Open</button>
+            <button role="tab" data-tab="closing" aria-selected="false">Closing soon</button>
+            <button role="tab" data-tab="resolved" aria-selected="false">Resolved</button>
+            <button role="tab" data-tab="all" aria-selected="false">All</button>
+          </div>
+          <div class="sort-btns" role="group" aria-label="Sort bounties">
+            <button data-sort="deadline" aria-pressed="true">Closing soon</button>
+            <button data-sort="pot" aria-pressed="false">Biggest pot</button>
+            <button data-sort="entries" aria-pressed="false">Most entries</button>
+          </div>
+          <div class="chip-row">
+            <div id="cat-chips" class="chips" role="group" aria-label="Category"></div>
+            <label class="fee-filter">Fee
+              <select id="fee-filter" aria-label="Filter by entry fee">
+                <option value="any">Any fee</option>
+                <option value="free">Free</option>
+                <option value="paid">Paid</option>
+              </select>
+            </label>
+          </div>
+          <input id="q" type="search" placeholder="Filter bounties…  ( / )" autocomplete="off" aria-label="Filter bounties">
+          <span id="split-meta" class="meta" aria-live="polite"></span>
+        </div>
+        <div id="split-rows" class="split-rows"></div>
+        <p id="split-empty" class="empty" hidden>No bounties match. Try a different filter.</p>
+        <p class="pane-foot"><a href="#/board">Full board table →</a></p>
+      </section>
+      <article id="detail" class="pane-detail" aria-live="polite">
+        <div class="sk sk-h"></div><div class="sk sk-l"></div><div class="sk sk-l" style="width:60%"></div><div class="sk sk-b"></div>
+      </article>
+    </div>`;
+}
+
+export function categoryChipsHTML(items, selected) {
+  const cats = [...new Set(items.map((b) => b.category).filter(Boolean))].sort();
+  const chip = (value, label) => `<button class="chipbtn" data-cat="${esc(value)}" aria-pressed="${String(value === selected)}">${esc(label)}</button>`;
+  return chip('', 'All') + cats.map((c) => chip(c, c)).join('');
+}
+
+const splitSig = (b) => [b.title, pot(b), b.entryFeeUsd, b.entryFeesUsd, b.submissionCount, b.status, b.deadline].join('|');
+
+export function paintSplitList(container, items, state, selectedSlug) {
+  const sorted = sortBoard(items, state.sort);
+  patchList(container, sorted, {
+    tag: 'a',
+    key: (b) => b.slug,
+    html: splitRowHTML,
+    sig: splitSig,
+    visible: (b) => boardVisible(b, state.tab, state.q, state.category, state.fee),
+    attrs: (b) => ({
+      class: `srow${b.slug === selectedSlug ? ' sel' : ''}`,
+      href: `#/bounty/${encodeURIComponent(b.slug)}`,
+      'data-prefetch': b.slug,
+      'data-slug': b.slug,
+      'aria-current': b.slug === selectedSlug ? 'true' : null,
+    }),
+  });
+  let drawn = 0;
+  for (const row of container.children) {
+    if (!row.hidden) drawn += 1;
+  }
+  return { kept: sorted.length, drawn };
+}
+
+/**
+ * How many submissions passed the checks — only when the detail payload
+ * carries the complete submission list, so the number is exact, never a
+ * guess from a truncated list.
+ */
+function passedCount(b) {
+  const subs = b.submissions;
+  if (!Array.isArray(subs) || !subs.length) return null;
+  if (subs.length !== Number(b.submissionCount)) return null;
+  return subs.filter((s) => s.status === 'passed').length;
+}
+
+/**
+ * The rewards table: each paid place's base prize, its share of the collected
+ * entry fees, and what it pays right now — straight from the API's live
+ * rewardsNow figures, with consecutive equal places grouped into one row.
+ */
+export function rewardsTableHTML(b) {
+  const now = (b.rewardsNow || [])
+    .map((r) => ({ place: Number(r.place), base: Number(r.baseUsd), fee: Number(r.feeShareUsd), amount: Number(r.amountUsd) }))
+    .filter((r) => Number.isFinite(r.place) && Number.isFinite(r.amount))
+    .sort((a, z) => a.place - z.place);
+  let rows = now;
+  if (!rows.length && b.rewards && typeof b.rewards === 'object') {
+    rows = Object.entries(b.rewards)
+      .map(([place, amount]) => ({ place: Number(place), base: Number(amount), fee: null, amount: Number(amount) }))
+      .filter((r) => Number.isFinite(r.place) && Number.isFinite(r.amount))
+      .sort((a, z) => a.place - z.place);
+  }
+  if (!rows.length) return '';
+  // Group consecutive places that pay identically: '4th–10th', '11th–20th'.
+  const groups = [];
+  for (const r of rows) {
+    const last = groups[groups.length - 1];
+    if (last && last.base === r.base && last.fee === r.fee && last.amount === r.amount && r.place === last.end + 1) {
+      last.end = r.place;
+    } else {
+      groups.push({ ...r, start: r.place, end: r.place });
+    }
+  }
+  const max = Math.max(...groups.map((g) => g.amount), 1);
+  const fees = Number(b.entryFeesUsd);
+  const payers = Number(b.entryFeePayers);
+  const placeLabel = (g) => (g.start === g.end ? ord(g.start) : `${ord(g.start)}–${ord(g.end)}`);
+  return `
+    <section class="panel" aria-label="Rewards">
+      <h2>Rewards</h2>
+      <p class="panel-note">${num(rows.length)} paid places · ${money(pot(b))} live pot</p>
+      <table class="rewards">
+        <thead><tr><th>Place</th><th class="num">Base</th><th class="num">Fee share</th><th class="num">Pays now</th></tr></thead>
+        <tbody>${groups.map((g, i) => `
+          <tr class="${i === 0 ? 'first' : ''}">
+            <td class="rw-place">${placeLabel(g)}</td>
+            <td class="num">${money(g.base)}</td>
+            <td class="num">${g.fee == null ? '—' : `+${money(g.fee)}`}</td>
+            <td class="num rw-pays">${money(g.amount)}${g.start !== g.end ? ' <span class="sub-inline">each</span>' : ''}
+              <span class="rw-bar"><i style="width:${Math.max((g.amount / max) * 100, 3).toFixed(1)}%"></i></span></td>
+          </tr>`).join('')}</tbody>
+      </table>
+      ${Number.isFinite(fees) && fees > 0 ? `<p class="panel-foot">Fee pool ${money(fees)}${Number.isFinite(payers) && payers > 0 ? ` from ${num(payers)} paid entries` : ''}, shared by the same proportions as the base prizes.</p>` : ''}
+    </section>`;
+}
+
+/** Opened → now → deadline → results-by, with the now marker placed by time. */
+export function phasesHTML(b) {
+  const opened = b.opensAt || b.publishedAt;
+  const deadline = b.deadline;
+  if (!opened || !deadline) return '';
+  const phases = Array.isArray(b.phases) ? b.phases : [];
+  const final = phases.find((p) => p.key === 'final');
+  const dev = phases.find((p) => p.key === 'dev');
+  const points = [
+    { label: 'Opened', at: opened },
+    { label: 'Deadline', at: deadline },
+  ];
+  if (final?.endsAt) points.push({ label: 'Results by', at: final.endsAt });
+  const start = new Date(points[0].at).getTime();
+  const end = new Date(points[points.length - 1].at).getTime();
+  const span = Math.max(end - start, 1);
+  const pos = (iso) => Math.min(100, Math.max(0, ((new Date(iso).getTime() - start) / span) * 100));
+  const nowPos = pos(new Date().toISOString());
+  const caption = dev ? `${esc(dev.title)}${dev.scores ? ` · ${esc(dev.scores)} scores` : ''}` : '';
+  // Label alignment: the first label starts at its dot, the last ends at its
+  // dot, and a middle label centers on its dot — unless the next point is so
+  // close that the centered label would collide with the next one, in which
+  // case it ends at its dot instead.
+  const align = points.map((p, i) => {
+    if (i === 0) return 'start';
+    if (i === points.length - 1) return 'end';
+    return (pos(points[i + 1].at) - pos(p.at)) < 35 ? 'end' : 'center';
+  });
+  return `
+    <section class="phases" aria-label="Dates and phases">
+      <div class="ph-track">
+        <span class="ph-fill" style="width:${nowPos.toFixed(1)}%"></span>
+        ${points.map((p) => `<span class="ph-dot" style="left:${pos(p.at).toFixed(1)}%" title="${esc(p.label)}"></span>`).join('')}
+        <span class="ph-now" style="left:${nowPos.toFixed(1)}%"><span class="ph-now-label">Now</span></span>
+      </div>
+      <div class="ph-labels">
+        ${points.map((p, i) => `<span class="ph-label ${align[i]}" style="left:${pos(p.at).toFixed(1)}%"><b>${esc(p.label)}</b>${dateShort(p.at)}</span>`).join('')}
+      </div>
+      ${caption ? `<p class="ph-caption">${caption}${final ? ` · then ${esc(final.title)}` : ''}</p>` : ''}
+    </section>`;
+}
+
+/** The embedded leaderboard preview: avatars, win rates with intervals, prize now. */
+export function leaderboardPreviewHTML(entries, b, slug) {
+  if (!entries.length) return '';
+  const rewards = new Map((b.rewardsNow || []).map((r) => [Number(r.place), Number(r.amountUsd)]));
+  const rows = entries.slice(0, 5).map((e) => {
+    const v = e.values || {};
+    const prize = rewards.get(Number(e.rank));
+    const initial = String(e.handle || '?').charAt(0).toUpperCase();
+    const img = !e.image ? '' : /^https?:\/\//.test(e.image) ? e.image : `https://make.fun${e.image.startsWith('/') ? '' : '/'}${e.image}`;
+    return `
+      <li>
+        <span class="pv-rank">${e.rank ?? '—'}</span>
+        <span class="ava" aria-hidden="true">${esc(initial)}${img ? `<img src="${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>
+        <span class="pv-who"><a href="#/u/${encodeURIComponent(e.handle || '')}">@${esc(e.handle || '—')}</a>
+          <span class="pv-title">${esc(e.title || '')}</span></span>
+        <span class="pv-score">${winRate(v.judge)}<span class="pv-interval">${winRate(v.judge_low)}–${winRate(v.judge_high)}</span></span>
+        <span class="pv-prize">${Number.isFinite(prize) ? money(prize) : '—'}</span>
+      </li>`;
+  }).join('');
+  return `
+    <section class="panel" aria-label="Top entries">
+      <h2>Top 5 now</h2>
+      <p class="panel-note">by judge win rate · ${num(b.submissionCount)} entries</p>
+      <ol class="preview">${rows}</ol>
+      <p class="panel-foot"><a href="#/leaderboard/${encodeURIComponent(slug)}">Full leaderboard →</a></p>
+    </section>`;
+}
+
+/** The detail pane of the split view: hero numbers, phases, rewards, preview. */
+export function bountyDetailHTML(b) {
+  const fees = Number(b.entryFeesUsd);
+  const left = new Date(b.deadline).getTime() - Date.now();
+  const ended = left <= 0;
+  const closing = left > 0 && left < 86400000;
+  const payers = Number(b.entryFeePayers);
+  const passed = passedCount(b);
+  const feeNote = hasFee(b)
+    ? (Number.isFinite(payers) && payers > 0 ? `${num(payers)} paid` : 'once per account')
+    : 'no entry fee';
+  const entriesNote = passed != null ? `${num(passed)} passed the checks` : 'submissions so far';
+  const kit = kitHref(b);
+  return `
+    <p class="crumbs"><a href="#/">All bounties</a> › ${esc(b.category || 'Bounty')}</p>
+    <div class="hero-block">
+      <p class="eyebrow">${esc(b.category || 'Bounty')} <span class="status-pill${ended ? ' ended' : ''}">${ended ? 'Ended' : 'Open · taking entries'}</span></p>
+      <h1 class="hero">${esc(b.title)}</h1>
+      <p class="lede">${esc(b.summary || '')}</p>
+      <div class="stat-cards">
+        <div class="sc pot"><span class="sc-label">Live pot</span><span class="sc-value">${money(pot(b))}</span><span class="sc-note">${money(b.rewardAmount)} prize${Number.isFinite(fees) && fees > 0 ? ` + ${money(fees)} fees` : ''}</span></div>
+        <div class="sc"><span class="sc-label">Entry fee</span><span class="sc-value">${hasFee(b) ? money(b.entryFeeUsd) : 'Free'}</span><span class="sc-note">${feeNote}</span></div>
+        <div class="sc${closing ? ' soon' : ''}"><span class="sc-label">Time left</span><span class="sc-value" data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span><span class="sc-note">${date(b.deadline)}</span></div>
+        <div class="sc"><span class="sc-label">Entries</span><span class="sc-value">${num(b.submissionCount)}</span><span class="sc-note">${entriesNote}</span></div>
+      </div>
+      ${b.sponsor?.name ? `<p class="sponsor-line">Sponsor <strong>${esc(b.sponsor.name)}${b.sponsor.isVerified ? ' ✓' : ''}</strong>${b.phase?.title ? ` · ${esc(b.phase.title)}` : ''}</p>` : ''}
+      ${b.skills?.length ? `<div class="skills-row"><span class="sc-label">Skills</span>${b.skills.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ')}</div>` : ''}
+    </div>
+    <div class="actions">
+      <a class="btn" href="https://make.fun/bounty/${encodeURIComponent(b.slug)}" target="_blank" rel="noopener">Enter on make.fun ↗</a>
+      <a class="btn ghost" href="#/leaderboard/${encodeURIComponent(b.slug)}">Leaderboard (${num(b.submissionCount)})</a>
+      ${kit ? `<a class="btn ghost" href="${esc(kit)}" target="_blank" rel="noopener">Kit</a>` : ''}
+    </div>
+    <div class="detail-grid">
+      ${rewardsTableHTML(b)}
+      <div id="lb-preview"></div>
+    </div>
+    ${phasesHTML(b)}
+    <h2>About this bounty</h2>
+    <div class="description">${esc(b.description || b.summary || '')}</div>`;
 }

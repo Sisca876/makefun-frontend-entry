@@ -4,8 +4,9 @@
 // header's counter shows the API traffic the cache is saving, live.
 //
 // Routes:
-//   #/                     the live board
-//   #/bounty/<slug>        one bounty, with the live board beside it
+//   #/                     the split board: list beside the selected bounty
+//   #/board                the full board as one table
+//   #/bounty/<slug>        the split board with a bounty selected
 //   #/leaderboard/<slug>   the virtualized leaderboard
 //   #/u/<handle>           a builder's profile
 //
@@ -14,13 +15,13 @@
 
 import {
   getBounty, getLeaderboardFirst, getOpenBoard, getProfile, getRankings,
-  getResolvedBoard, getSubmission, getSWR, onStats, prefetchBounty, stats,
+  getResolvedBoard, getSubmission, onStats, prefetchBounty, setViewStats, stats, viewStats,
 } from './api.js';
 import { bytes, num, timeLeft } from './fmt.js';
 import {
-  boardShell, boardVisible, bountyHTML, bountyShell, entryDetailHTML,
-  leaderboardShell, mountLeaderboard, normalizeLeaderboard, paintBoard,
-  patchList, profileHTML, sideRowHTML, sortBoard,
+  boardShell, boardVisible, bountyDetailHTML, categoryChipsHTML, entryDetailHTML,
+  leaderboardPreviewHTML, leaderboardShell, mountLeaderboard, normalizeLeaderboard,
+  paintBoard, paintSplitList, profileHTML, sortBoard, splitShell, statsStripHTML, tickerHTML,
 } from './views.js';
 
 const mount = document.getElementById('a');
@@ -45,15 +46,18 @@ mount.innerHTML = `
     <kbd>/</kbd> search · <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>Enter</kbd> open · <kbd>Esc</kbd> clear.
     Data: <a href="https://make.fun/api/openapi.json" target="_blank" rel="noopener">make.fun API</a> · Built for
     <a href="https://make.fun/bounty/makefun-frontend-01" target="_blank" rel="noopener">makefun-frontend-01</a>.</p>
+    <p id="view-stats" class="view-stats"></p>
   </footer>
   <div id="live" class="sr-only" aria-live="polite"></div>`;
 
 const view = document.getElementById('view');
 const live = document.getElementById('live');
 const counterEl = document.getElementById('counter');
+const viewStatsEl = document.getElementById('view-stats');
 
 function paintCounter() {
-  counterEl.textContent = `${stats.requests} req · ${stats.revalidated} cached · ${bytes(stats.bytesDown)} down · ${bytes(stats.bytesSaved)} saved`;
+  counterEl.textContent = `${stats.requests} req · ${stats.revalidated} 304 · ${bytes(stats.bytesDown)} down · ${bytes(stats.bytesSaved)} saved`;
+  viewStatsEl.textContent = `This view: ${num(stats.requests)} API requests · ${num(stats.revalidated)} unchanged (304) · ${num(stats.cached)} from cache · ${num(viewStats.kept)} rows kept, ${num(viewStats.drawn)} drawn — 465 B first load · ETag cache · rows patched in place · virtual leaderboard`;
 }
 let counterQueued = false;
 onStats(() => {
@@ -67,6 +71,10 @@ paintCounter();
 setInterval(() => {
   for (const el of document.querySelectorAll('[data-countdown]')) {
     const next = timeLeft(el.dataset.countdown);
+    if (el.textContent !== next) el.textContent = next;
+  }
+  for (const el of document.querySelectorAll('[data-countdown-short]')) {
+    const next = timeLeft(el.dataset.countdownShort).replace(/ left$/, '');
     if (el.textContent !== next) el.textContent = next;
   }
 }, 1000);
@@ -107,17 +115,18 @@ document.addEventListener('keydown', (ev) => {
     return;
   }
   if (ev.key !== 'j' && ev.key !== 'k' && ev.key !== 'Enter') return;
-  const rows = [...view.querySelectorAll('#rows tr:not([hidden])')];
+  const rows = [...view.querySelectorAll('#rows tr:not([hidden]), #split-rows .srow:not([hidden])')];
   if (!rows.length) return;
   if (ev.key === 'Enter' && selIndex >= 0) {
-    rows[selIndex]?.querySelector('a')?.click();
+    const el = rows[selIndex];
+    if (el) (el.matches('a') ? el : el.querySelector('a'))?.click();
     return;
   }
   ev.preventDefault();
   selIndex = ev.key === 'j'
     ? Math.min(selIndex + 1, rows.length - 1)
     : Math.max(selIndex - 1, 0);
-  rows.forEach((r, i) => r.classList.toggle('sel', i === selIndex));
+  rows.forEach((r, i) => r.classList.toggle('kb', i === selIndex));
   rows[selIndex].scrollIntoView({ block: 'nearest' });
 });
 
@@ -157,6 +166,7 @@ async function showBoard() {
   const paint = () => {
     paintBoard(tbody, items(), state);
     const shown = items().filter((b) => boardVisible(b, state.tab, state.q)).length;
+    setViewStats(items().length, shown);
     meta.textContent = resolvedLoading && (state.tab === 'resolved' || state.tab === 'all')
       ? 'Loading resolved bounties…'
       : `${shown} of ${items().length} bounties · updated live`;
@@ -218,66 +228,160 @@ async function showBoard() {
   document.title = 'Beacon · make.fun bounties';
 }
 
-// ----------------------------------------------------------------- bounty --
+// -------------------------------------------------------------- split ----
+// The default page: the bounty list on the left, the selected bounty beside
+// it. Clicking a row swaps the detail pane in place — the list, its scroll
+// position, and the filters all survive.
 
-async function showBounty(slug) {
-  setNav('');
-  view.innerHTML = bountyShell();
+async function showSplit(slug) {
+  setNav('board');
+  selIndex = -1;
+  view.innerHTML = splitShell();
+  const state = { tab: 'open', q: '', sort: 'deadline', category: '', fee: 'any' };
+  const rowsEl = view.querySelector('#split-rows');
+  const meta = view.querySelector('#split-meta');
+  const empty = view.querySelector('#split-empty');
+  const chipsEl = view.querySelector('#cat-chips');
+  const statsEl = view.querySelector('#split-stats');
+  const tickerSlot = view.querySelector('#ticker-slot');
   const detail = view.querySelector('#detail');
-  const sideRows = view.querySelector('#side-rows');
+  let openItems = [];
+  let resolvedItems = [];
+  let resolvedLoaded = false;
+  let resolvedLoading = false;
+  let selected = slug || '';
+  let detailToken = 0;
+  let chipsSig = '';
   let cancelled = false;
   viewCleanup = () => { cancelled = true; };
+  const items = () => [...openItems, ...resolvedItems];
 
-  const paintSide = (list) => {
-    const others = sortBoard(list.filter((b) => b.slug !== slug), 'deadline').slice(0, 14);
-    patchList(sideRows, others, {
-      tag: 'div',
-      key: (b) => b.slug,
-      html: sideRowHTML,
-      sig: (b) => [b.title, b.potUsd ?? b.rewardAmount, b.submissionCount].join('|'),
-    });
+  const paint = () => {
+    const { kept, drawn } = paintSplitList(rowsEl, items(), state, selected);
+    setViewStats(kept, drawn);
+    meta.textContent = resolvedLoading && (state.tab === 'resolved' || state.tab === 'all')
+      ? 'Loading resolved bounties…'
+      : `${num(drawn)} shown · ${num(items().length)} loaded`;
+    empty.hidden = drawn !== 0;
+    const sig = [...new Set(items().map((b) => b.category).filter(Boolean))].sort().join('|');
+    if (sig !== chipsSig) {
+      chipsSig = sig;
+      chipsEl.innerHTML = categoryChipsHTML(items(), state.category);
+      for (const btn of chipsEl.querySelectorAll('.chipbtn')) {
+        btn.addEventListener('click', () => { state.category = btn.dataset.cat; paint(); });
+      }
+    } else {
+      for (const btn of chipsEl.querySelectorAll('.chipbtn')) {
+        btn.setAttribute('aria-pressed', String(btn.dataset.cat === state.category));
+      }
+    }
   };
 
-  try {
-    const [b, openList] = await Promise.all([
-      getSWR(`/competitions/${encodeURIComponent(slug)}`, {
-        onFresh: (fresh) => { if (!cancelled && fresh) detail.innerHTML = bountyHTML(fresh); },
-      }),
-      getOpenBoard().catch(() => []),
-    ]);
-    if (cancelled) return;
-    detail.innerHTML = bountyHTML(b);
-    paintSide(openList);
-    document.title = `${b.title} · Beacon`;
-    live.textContent = b.title;
-    window.__shotReady = true;
+  const paintStats = () => {
+    const open = items().filter((b) => b.status === 'open');
+    statsEl.innerHTML = statsStripHTML(open);
+    tickerSlot.innerHTML = tickerHTML(open);
+  };
 
-    // Leaderboard preview: the top 10, beside the detail.
-    const preview = detail.querySelector('#lb-preview');
+  const selectBounty = async (next, { replace = false } = {}) => {
+    if (!next) return;
+    selected = next;
+    for (const row of rowsEl.children) {
+      const isSel = row.dataset.slug === next;
+      row.classList.toggle('sel', isSel);
+      if (isSel) row.setAttribute('aria-current', 'true');
+      else row.removeAttribute('aria-current');
+    }
+    if (replace) history.replaceState(null, '', `#/bounty/${encodeURIComponent(next)}`);
+    const token = ++detailToken;
     try {
-      const lb = await getLeaderboardFirst(slug);
-      if (cancelled) return;
-      const top = normalizeLeaderboard(lb, lb.view).slice(0, 10);
-      if (top.length) {
-        preview.innerHTML = `<h2>Top entries</h2><ol class="top10">${top.map((e) => `
-          <li><a href="#/u/${encodeURIComponent(e.handle || '')}">@${String(e.handle || '—').replace(/</g, '&lt;')}</a>
-          <span class="t">${String(e.title || '').replace(/</g, '&lt;')}</span>
-          <span class="r">#${e.rank ?? '—'}</span></li>`).join('')}</ol>
-          <p><a href="#/leaderboard/${encodeURIComponent(slug)}">Full leaderboard →</a></p>`;
-      }
-    } catch { /* a bounty without a leaderboard yet just shows no preview */ }
-
-    // The sidebar keeps refreshing while the page is open.
-    const timer = setInterval(async () => {
-      if (cancelled || document.visibilityState !== 'visible') return;
+      const b = await getBounty(next);
+      if (cancelled || token !== detailToken) return;
+      detail.innerHTML = bountyDetailHTML(b);
+      document.title = `${b.title} · Beacon`;
+      live.textContent = b.title;
+      // Leaderboard preview: the top 5, beside the rewards table.
       try {
-        paintSide(await getOpenBoard());
-      } catch { /* keep the last good sidebar */ }
-    }, 30000);
-    viewCleanup = () => { cancelled = true; clearInterval(timer); };
-  } catch (err) {
-    if (!cancelled) mountError(err, () => showBounty(slug));
+        const lb = await getLeaderboardFirst(next);
+        if (cancelled || token !== detailToken) return;
+        const top = normalizeLeaderboard(lb, lb.view);
+        const slot = detail.querySelector('#lb-preview');
+        if (slot) slot.innerHTML = leaderboardPreviewHTML(top, b, next);
+      } catch { /* the preview is a bonus; the bounty stands without it */ }
+      if (!cancelled && token === detailToken) window.__shotReady = true;
+    } catch (err) {
+      if (cancelled || token !== detailToken) return;
+      detail.innerHTML = errorHTML(`Could not load “${next.replace(/</g, '&lt;')}”.`, () => {});
+      const retry = detail.querySelector('#retry');
+      if (retry) retry.addEventListener('click', () => selectBounty(next));
+      window.__shotReady = true;
+    }
+  };
+
+  const refreshOpen = async () => {
+    try {
+      openItems = (await getOpenBoard()).map((b) => ({ ...b, status: 'open' }));
+      if (cancelled) return;
+      paintStats();
+      paint();
+    } catch (err) {
+      if (!openItems.length && !cancelled) {
+        detail.innerHTML = errorHTML('Could not load the bounty board.', () => {});
+        window.__shotReady = true;
+      }
+    }
+  };
+  const loadResolved = async () => {
+    if (resolvedLoaded || resolvedLoading) return;
+    resolvedLoading = true;
+    paint();
+    try {
+      resolvedItems = (await getResolvedBoard()).map((b) => ({ ...b, status: 'resolved' }));
+      resolvedLoaded = true;
+    } catch { /* the open board stays usable; resolved retries on next click */ }
+    resolvedLoading = false;
+    if (!cancelled) { paintStats(); paint(); }
+  };
+
+  rowsEl.addEventListener('click', (ev) => {
+    const row = ev.target.closest('[data-slug]');
+    if (!row) return;
+    ev.preventDefault();
+    selectBounty(row.dataset.slug, { replace: true });
+  });
+  view.querySelector('#q').addEventListener('input', (ev) => { state.q = ev.target.value; selIndex = -1; paint(); });
+  view.querySelector('#fee-filter').addEventListener('change', (ev) => { state.fee = ev.target.value; paint(); });
+  for (const tab of view.querySelectorAll('[data-tab]')) {
+    tab.addEventListener('click', () => {
+      state.tab = tab.dataset.tab;
+      for (const t of view.querySelectorAll('[data-tab]')) t.setAttribute('aria-selected', String(t === tab));
+      if ((state.tab === 'resolved' || state.tab === 'all') && !resolvedLoaded) loadResolved();
+      paint();
+    });
   }
+  for (const btn of view.querySelectorAll('[data-sort]')) {
+    btn.addEventListener('click', () => {
+      state.sort = btn.dataset.sort;
+      for (const b of view.querySelectorAll('[data-sort]')) b.setAttribute('aria-pressed', String(b === btn));
+      paint();
+    });
+  }
+
+  await refreshOpen();
+  if (cancelled) return;
+  if (!selected) {
+    const sorted = sortBoard(items(), state.sort);
+    selected = (sorted.find((b) => b.slug === 'makefun-frontend-01') || sorted[0])?.slug || '';
+  }
+  selectBounty(selected);
+  loadResolved();
+  const timer = setInterval(async () => {
+    if (cancelled || document.visibilityState !== 'visible') return;
+    await refreshOpen(); // the list, stats, and ticker refresh; the detail pane is left alone so a selection is never stolen
+  }, 30000);
+  viewCleanup = () => { cancelled = true; clearInterval(timer); };
+  live.textContent = 'Live bounty board';
+  document.title = 'Beacon · make.fun bounties';
 }
 
 // ------------------------------------------------------------ leaderboard --
@@ -358,6 +462,7 @@ async function showProfile(handle) {
       getRankings(handle).catch(() => null),
     ]);
     view.innerHTML = profileHTML(p, rankings);
+    setViewStats(p.solutions?.length || 0, p.solutions?.length || 0);
     document.title = `@${p.handle} · Beacon`;
     live.textContent = `Profile of ${p.display_name || p.handle}`;
     window.__shotReady = true;
@@ -379,11 +484,13 @@ async function render() {
   const bounty = hash.match(/^#\/bounty\/([^/?#]+)/);
   const leaderboard = hash.match(/^#\/leaderboard\/([^/?#]+)/);
   const profile = hash.match(/^#\/u\/([^/?#]+)/);
+  const board = hash === '#/board';
   try {
-    if (bounty) await showBounty(decodeURIComponent(bounty[1]));
+    if (bounty) await showSplit(decodeURIComponent(bounty[1]));
     else if (leaderboard) await showLeaderboard(decodeURIComponent(leaderboard[1]));
     else if (profile) await showProfile(decodeURIComponent(profile[1]));
-    else await showBoard();
+    else if (board) await showBoard();
+    else await showSplit('');
   } catch (err) {
     mountError(err, render);
   }

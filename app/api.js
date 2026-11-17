@@ -9,7 +9,15 @@ const API = 'https://make.fun/api';
 const STORE_KEY = 'beacon-cache-v1';
 const MAX_STORE_ENTRIES = 60;
 
-export const stats = { requests: 0, revalidated: 0, bytesDown: 0, bytesSaved: 0 };
+export const stats = { requests: 0, revalidated: 0, cached: 0, bytesDown: 0, bytesSaved: 0 };
+
+/** Rows the current view keeps in memory vs rows actually drawn in the DOM. */
+export const viewStats = { kept: 0, drawn: 0 };
+export function setViewStats(kept, drawn) {
+  viewStats.kept = kept;
+  viewStats.drawn = drawn;
+  emit();
+}
 const listeners = new Set();
 export const onStats = (fn) => listeners.add(fn);
 const emit = () => listeners.forEach((fn) => fn(stats));
@@ -47,7 +55,7 @@ async function request(path, { signal } = {}) {
     // preflight): serve the cached body instead of failing the page. Only a
     // cold start with no cache at all still throws.
     if (entry) {
-      stats.revalidated += 1;
+      stats.cached += 1;
       stats.bytesSaved += entry.bytes || 0;
       emit();
       return entry.body;
@@ -56,6 +64,7 @@ async function request(path, { signal } = {}) {
   }
   if (res.status === 304 && entry) {
     stats.revalidated += 1;
+    stats.cached += 1;
     stats.bytesSaved += entry.bytes || 0;
     entry.at = Date.now();
     emit();
@@ -78,6 +87,8 @@ export const get = (path, opts) => request(path, opts);
 export async function getSWR(path, { maxAge = 30000, onFresh } = {}) {
   const hit = peek(path);
   if (hit && hit.age < maxAge) {
+    stats.cached += 1;
+    emit();
     request(path).then(onFresh, () => {}); // background refresh; the UI patches in place
     return hit.data;
   }

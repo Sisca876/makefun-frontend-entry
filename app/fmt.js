@@ -32,6 +32,12 @@ export function date(iso) {
   return `${new Date(iso).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' })} UTC`;
 }
 
+/** A deadline without the year, for tight timeline labels: 'Nov 17, 12:30 PM'. */
+export function dateShort(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'UTC' });
+}
+
 /** The time until a deadline: '2d 4h left', '35m left', 'ended'. */
 export function timeLeft(iso) {
   const ms = new Date(iso).getTime() - Date.now();
@@ -73,4 +79,26 @@ export function ms(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '—';
   return n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${Math.round(n)}ms`;
+}
+
+/** How long ago an ISO timestamp was: 'just now', '5m ago', '3h ago', '2d ago'. */
+export function relTime(iso) {
+  const msAgo = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(msAgo) || msAgo < 0) return 'just now';
+  const minutes = Math.floor(msAgo / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+/** An ordinal: 1 -> '1st', 2 -> '2nd', 3 -> '3rd', 4 -> '4th'. */
+export function ord(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  const mod100 = v % 100;
+  const suffix = (mod100 >= 11 && mod100 <= 13) ? 'th'
+    : v % 10 === 1 ? 'st' : v % 10 === 2 ? 'nd' : v % 10 === 3 ? 'rd' : 'th';
+  return `${v}${suffix}`;
 }
