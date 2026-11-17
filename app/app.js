@@ -30,7 +30,7 @@ let boardTimer = 0;
 mount.innerHTML = `
   <a class="skip" href="#view">Skip to content</a>
   <header class="top">
-    <a class="logo" href="#/">◆ Beacon</a>
+    <a class="logo" href="#/"><span class="mark">◆</span> Beacon</a>
     <nav aria-label="Main">
       <a href="#/" data-nav="board">Board</a>
       <span class="find">
@@ -351,7 +351,7 @@ async function showLeaderboard(slug) {
 async function showProfile(handle) {
   setNav('');
   window.__shotReady = false;
-  view.innerHTML = '<p>Loading profile…</p>';
+  view.innerHTML = '<div class="sk sk-h" style="width:220px"></div><div class="sk sk-l"></div><div class="sk sk-b"></div>';
   try {
     const [p, rankings] = await Promise.all([
       getProfile(handle),

@@ -40,17 +40,20 @@ export function patchList(container, items, { tag, key, html, sig, visible }) {
 // ---------------------------------------------------------------- board ----
 
 export function boardRowHTML(b) {
-  const closing = new Date(b.deadline).getTime() - Date.now() < 86400000;
+  const left = new Date(b.deadline).getTime() - Date.now();
+  const closing = left > 0 && left < 86400000;
+  const urgent = left > 0 && left < 3600000;
+  const ended = left <= 0;
   const fees = Number(b.entryFeesUsd);
   return `
     <td class="c-title">
       <a class="t" href="#/bounty/${encodeURIComponent(b.slug)}" data-prefetch="${esc(b.slug)}">${esc(b.title)}</a>
       <span class="sub">${esc(b.category || '')}${b.skills?.length ? ` · ${esc(b.skills.slice(0, 3).join(', '))}` : ''}</span>
     </td>
-    <td class="c-pot">${moneyShort(pot(b))}<span class="sub">${Number.isFinite(fees) && fees > 0 ? `+${moneyShort(fees)} fees` : 'prize'}</span></td>
+    <td class="c-pot num">${moneyShort(pot(b))}<span class="sub${Number.isFinite(fees) && fees > 0 ? ' fees' : ''}">${Number.isFinite(fees) && fees > 0 ? `+${moneyShort(fees)} fees` : 'prize'}</span></td>
     <td class="c-fee">${b.entryFeeUsd ? `<span class="fee">${money(b.entryFeeUsd)} fee</span>` : '<span class="free">free</span>'}</td>
-    <td class="c-due ${closing ? 'soon' : ''}"><span data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span><span class="sub">${date(b.deadline)}</span></td>
-    <td class="c-n">${num(b.submissionCount)}<span class="sub">entries</span></td>`;
+    <td class="c-due ${urgent ? 'urgent' : closing ? 'soon' : ended ? 'ended' : ''}"><span data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span><span class="sub">${date(b.deadline)}</span></td>
+    <td class="c-n num">${num(b.submissionCount)}<span class="sub">entries</span></td>`;
 }
 
 const boardSig = (b) => [b.title, pot(b), b.entryFeeUsd, b.submissionCount, b.status, b.deadline].join('|');
@@ -58,6 +61,7 @@ const boardSig = (b) => [b.title, pot(b), b.entryFeeUsd, b.submissionCount, b.st
 export function boardShell() {
   return `
     <div class="page-head">
+      <p class="eyebrow"><span class="live-dot"></span>Live · every bounty, updating</p>
       <h1>Live bounty board</h1>
       <p class="lede">Every bounty on make.fun, live from the public API. Type to filter · <kbd>/</kbd> search · <kbd>j</kbd>/<kbd>k</kbd> move.</p>
     </div>
@@ -81,7 +85,7 @@ export function boardShell() {
     </div>
     <div class="table-wrap">
       <table class="board" aria-label="Bounties">
-        <thead><tr><th>Bounty</th><th>Pot</th><th>Entry</th><th>Closes</th><th>Entries</th></tr></thead>
+        <thead><tr><th>Bounty</th><th class="num">Pot</th><th>Entry</th><th>Closes</th><th class="num">Entries</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -130,29 +134,34 @@ function payoutRows(b) {
     .sort((a, b) => a[0] - b[0])
     .slice(0, 20);
   if (!places.length) return '';
+  const max = Math.max(...places.map(([, a]) => a), 1);
   return `<h2>Payouts</h2><ol class="payouts">${places
-    .map(([p, a]) => `<li><span class="place">#${p}</span><span class="amt">${money(a)}</span></li>`)
+    .map(([p, a], i) => `<li class="${i === 0 ? 'first' : ''}"><span class="place">#${p}</span><span class="pbar"><i style="width:${Math.max((a / max) * 100, 3).toFixed(1)}%"></i></span><span class="amt">${money(a)}</span></li>`)
     .join('')}</ol>`;
 }
 
 export function bountyHTML(b) {
   const fees = Number(b.entryFeesUsd);
-  const feeNote = b.entryFeeUsd
-    ? `<dt>Entry fee</dt><dd>${money(b.entryFeeUsd)}${b.entryFeePayers ? ` · ${num(b.entryFeePayers)} paid` : ''}</dd>`
-    : '<dt>Entry fee</dt><dd>Free</dd>';
+  const left = new Date(b.deadline).getTime() - Date.now();
+  const ended = left <= 0;
+  const closing = left > 0 && left < 86400000;
+  const feeValue = b.entryFeeUsd ? money(b.entryFeeUsd) : 'Free';
+  const feeNote = b.entryFeeUsd && b.entryFeePayers ? `${num(b.entryFeePayers)} paid` : (b.entryFeeUsd ? 'per entry' : 'no entry fee');
   return `
     <p class="crumbs"><a href="#/">All bounties</a> › ${esc(b.category || 'Bounty')}</p>
-    <h1>${esc(b.title)}</h1>
-    <p class="lede">${esc(b.summary || '')}</p>
-    <dl class="facts">
-      <dt>Pot</dt><dd><strong>${money(pot(b))}</strong><span class="sub"> ${money(b.rewardAmount)} prize${Number.isFinite(fees) && fees > 0 ? ` + ${money(fees)} entry fees` : ''}</span></dd>
-      ${feeNote}
-      <dt>Deadline</dt><dd>${date(b.deadline)} · <strong data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</strong></dd>
-      <dt>Entries</dt><dd>${num(b.submissionCount)}${b.submissionRule ? ` · ${esc(b.submissionRule)}` : ''}</dd>
-      <dt>Status</dt><dd>${esc(b.status || '')}${b.phase?.title ? ` · ${esc(b.phase.title)}` : ''}</dd>
-      ${b.sponsor?.name ? `<dt>Sponsor</dt><dd>${esc(b.sponsor.name)}${b.sponsor.isVerified ? ' ✓' : ''}</dd>` : ''}
-      ${b.skills?.length ? `<dt>Skills</dt><dd>${b.skills.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ')}</dd>` : ''}
-    </dl>
+    <div class="hero-block">
+      <p class="eyebrow">${esc(b.category || 'Bounty')} <span class="status-pill${ended ? ' ended' : ''}">${ended ? 'Ended' : (b.status || 'Open')}</span></p>
+      <h1 class="hero">${esc(b.title)}</h1>
+      <p class="lede">${esc(b.summary || '')}</p>
+      <div class="stat-cards">
+        <div class="sc pot"><span class="sc-label">Pot</span><span class="sc-value">${money(pot(b))}</span><span class="sc-note">${money(b.rewardAmount)} prize${Number.isFinite(fees) && fees > 0 ? ` + ${money(fees)} fees` : ''}</span></div>
+        <div class="sc"><span class="sc-label">Entry fee</span><span class="sc-value">${feeValue}</span><span class="sc-note">${feeNote}</span></div>
+        <div class="sc${closing ? ' soon' : ''}"><span class="sc-label">Deadline</span><span class="sc-value" data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span><span class="sc-note">${date(b.deadline)}</span></div>
+        <div class="sc"><span class="sc-label">Entries</span><span class="sc-value">${num(b.submissionCount)}</span><span class="sc-note">${b.submissionRule ? esc(b.submissionRule) : 'submissions so far'}</span></div>
+      </div>
+      ${b.sponsor?.name ? `<p class="sponsor-line">Sponsor <strong>${esc(b.sponsor.name)}${b.sponsor.isVerified ? ' ✓' : ''}</strong>${b.phase?.title ? ` · ${esc(b.phase.title)}` : ''}</p>` : ''}
+      ${b.skills?.length ? `<div class="skills-row"><span class="sc-label">Skills</span>${b.skills.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ')}</div>` : ''}
+    </div>
     <div class="actions">
       <a class="btn" href="https://make.fun/bounty/${encodeURIComponent(b.slug)}" target="_blank" rel="noopener">Open on make.fun ↗</a>
       <a class="btn ghost" href="#/leaderboard/${encodeURIComponent(b.slug)}">Leaderboard (${num(b.submissionCount)})</a>
@@ -167,14 +176,14 @@ export function bountyHTML(b) {
 export function sideRowHTML(b) {
   return `<a href="#/bounty/${encodeURIComponent(b.slug)}" data-prefetch="${esc(b.slug)}">
     <span class="t">${esc(b.title)}</span>
-    <span class="m">${moneyShort(pot(b))} · <span data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span></span>
+    <span class="m"><b>${moneyShort(pot(b))}</b> · <span data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span></span>
   </a>`;
 }
 
 export function bountyShell() {
   return `
     <div class="split">
-      <article id="detail" class="detail" aria-live="polite"><p>Loading bounty…</p></article>
+      <article id="detail" class="detail" aria-live="polite"><div class="sk sk-h"></div><div class="sk sk-l"></div><div class="sk sk-l" style="width:60%"></div><div class="sk sk-b"></div></article>
       <aside class="side" aria-label="Live board">
         <h2>Live board</h2>
         <p class="sub">Other open bounties, updating live.</p>
@@ -222,6 +231,7 @@ export function leaderboardShell(b) {
       <span class="meta" id="lb-count" aria-live="polite"></span>
     </div>
     <div id="entry-detail"></div>
+    <div class="lb-head" aria-hidden="true"><span>Rank</span><span>Prize</span><span>Builder · entry</span><span>Judge win rate</span><span class="num">Size</span></div>
     <div id="lb-scroll" class="lb-scroll" tabindex="0" aria-label="Leaderboard entries, virtualized list">
       <div id="lb-spacer" class="lb-spacer"><div id="lb-window" class="lb-window"></div></div>
     </div>
@@ -230,7 +240,7 @@ export function leaderboardShell(b) {
 
 /** A virtualized leaderboard: only the visible slice of rows exists in the DOM. */
 export function mountLeaderboard(root, data, onSelect) {
-  const ROW_H = 46;
+  const ROW_H = 54;
   const scroll = root.querySelector('#lb-scroll');
   const spacer = root.querySelector('#lb-spacer');
   const win = root.querySelector('#lb-window');
@@ -277,7 +287,8 @@ export function mountLeaderboard(root, data, onSelect) {
     win.style.transform = `translateY(${start * ROW_H}px)`;
     win.innerHTML = filtered.slice(start, end).map((e) => {
       const sel = e.submission_id === selectedId ? ' sel' : '';
-      return `<div class="lb-row${sel}" role="button" tabindex="0" data-id="${esc(e.submission_id)}" style="height:${ROW_H}px">${rowHTML(e)}</div>`;
+      const top = e.rank === 1 ? ' top1' : e.rank === 2 ? ' top2' : e.rank === 3 ? ' top3' : '';
+      return `<div class="lb-row${sel}${top}" role="button" tabindex="0" data-id="${esc(e.submission_id)}" style="height:${ROW_H}px">${rowHTML(e)}</div>`;
     }).join('');
     shownEl.textContent = num(end - start);
     totalEl.textContent = num(filtered.length);
@@ -347,7 +358,7 @@ export function entryDetailHTML(e) {
         </div>
       </div>
       <div class="dc-art">
-        <img src="https://make.fun/api/submissions/${encodeURIComponent(e.submission_id)}/artifact.webp" alt="" loading="lazy"
+        <img crossorigin="anonymous" src="https://make.fun/api/submissions/${encodeURIComponent(e.submission_id)}/artifact.webp" alt="" loading="lazy"
           onload="this.classList.add('ok')" onerror="this.remove()">
       </div>
     </section>`;
@@ -381,8 +392,9 @@ export function profileHTML(p, rankings) {
   }).join('');
   return `
     <div class="profile-head">
-      ${p.image ? `<img class="avatar" src="${esc(p.image)}" alt="" width="72" height="72" onerror="this.style.display='none'">` : ''}
+      ${p.image ? `<img class="avatar" src="${esc(p.image)}" alt="" width="84" height="84" onerror="this.style.display='none'">` : ''}
       <div>
+        <p class="eyebrow">Builder</p>
         <h1>${esc(p.display_name || p.handle)}</h1>
         <p class="lede">@${esc(p.handle)}${p.joined_at ? ` · joined ${date(p.joined_at)}` : ''}</p>
         ${p.bio ? `<p>${esc(p.bio)}</p>` : ''}
