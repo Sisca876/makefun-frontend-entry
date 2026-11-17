@@ -20,6 +20,45 @@ function kitHref(b) {
 /** Whether a bounty charges an entry fee (the API stores it as a string). */
 const hasFee = (b) => Number(b.entryFeeUsd) > 0;
 
+// ------------------------------------------------------------ saved ----
+// Starred bounties, kept in this browser only: a set of slugs in
+// localStorage, with change listeners so every view repaints its stars.
+
+const SAVED_KEY = 'beacon-saved-v1';
+const savedSet = new Set();
+try {
+  const raw = JSON.parse(localStorage.getItem(SAVED_KEY) || '[]');
+  if (Array.isArray(raw)) for (const s of raw) savedSet.add(String(s));
+} catch { /* a corrupt store just means nothing saved */ }
+
+const savedListeners = new Set();
+export function isSaved(slug) { return savedSet.has(slug); }
+export function savedSlugs() { return [...savedSet]; }
+export function toggleSaved(slug) {
+  if (!slug) return;
+  if (savedSet.has(slug)) savedSet.delete(slug);
+  else savedSet.add(slug);
+  try { localStorage.setItem(SAVED_KEY, JSON.stringify([...savedSet])); } catch { /* private mode: memory only */ }
+  for (const fn of savedListeners) fn(slug);
+}
+export function onSavedChange(fn) {
+  savedListeners.add(fn);
+  return () => savedListeners.delete(fn);
+}
+
+/** The star toggle rendered inside a row: filled amber when saved. */
+function starHTML(slug) {
+  const saved = isSaved(slug);
+  return `<span class="star${saved ? ' saved' : ''}" data-star="${esc(slug)}" role="button" tabindex="0" aria-pressed="${saved}" aria-label="${saved ? 'Remove from saved bounties' : 'Save this bounty'}" title="${saved ? 'Saved' : 'Save'}">${saved ? '★' : '☆'}</span>`;
+}
+
+/** A real <button> star for table cells and the detail hero. */
+function starButtonHTML(slug, withWord) {
+  const saved = isSaved(slug);
+  const label = withWord ? (saved ? '★ Saved' : '☆ Save') : (saved ? '★' : '☆');
+  return `<button class="${withWord ? 'btn ghost save-btn' : 'star-btn'}" data-star="${esc(slug)}" aria-pressed="${saved}" aria-label="${saved ? 'Remove from saved bounties' : 'Save this bounty'}">${label}</button>`;
+}
+
 /** Re-render a keyed list without rebuilding it. `tag` is the row element. */
 export function patchList(container, items, { tag, key, html, sig, visible, attrs }) {
   const seen = new Set();
@@ -65,8 +104,13 @@ export function boardRowHTML(b) {
   const fees = Number(b.entryFeesUsd);
   return `
     <td class="c-title">
-      <a class="t" href="#/bounty/${encodeURIComponent(b.slug)}" data-prefetch="${esc(b.slug)}">${esc(b.title)}</a>
-      <span class="sub">${esc(b.category || '')}${b.skills?.length ? ` · ${esc(b.skills.slice(0, 3).join(', '))}` : ''}</span>
+      <span class="title-wrap">
+        ${starButtonHTML(b.slug, false)}
+        <span class="title-main">
+          <a class="t" href="#/bounty/${encodeURIComponent(b.slug)}" data-prefetch="${esc(b.slug)}">${esc(b.title)}</a>
+          <span class="sub">${esc(b.category || '')}${b.skills?.length ? ` · ${esc(b.skills.slice(0, 3).join(', '))}` : ''}</span>
+        </span>
+      </span>
     </td>
     <td class="c-pot num">${moneyShort(pot(b))}<span class="sub${Number.isFinite(fees) && fees > 0 ? ' fees' : ''}">${Number.isFinite(fees) && fees > 0 ? `+${moneyShort(fees)} fees` : 'prize'}</span></td>
     <td class="c-fee">${b.entryFeeUsd ? `<span class="fee">${money(b.entryFeeUsd)} fee</span>` : '<span class="free">free</span>'}</td>
@@ -74,7 +118,7 @@ export function boardRowHTML(b) {
     <td class="c-n num">${num(b.submissionCount)}<span class="sub">entries</span></td>`;
 }
 
-const boardSig = (b) => [b.title, pot(b), b.entryFeeUsd, b.submissionCount, b.status, b.deadline].join('|');
+const boardSig = (b) => [b.title, pot(b), b.entryFeeUsd, b.submissionCount, b.status, b.deadline, isSaved(b.slug) ? '1' : '0'].join('|');
 
 export function boardShell() {
   return `
@@ -415,7 +459,7 @@ export function profileHTML(p, rankings) {
   }).join('');
   return `
     <div class="profile-head">
-      ${p.image ? `<img class="avatar" src="${esc(p.image)}" alt="" width="84" height="84" onerror="this.style.display='none'">` : ''}
+      ${p.image ? `<img class="avatar" crossorigin="anonymous" src="${esc(p.image)}" alt="" width="84" height="84" onerror="this.style.display='none'">` : ''}
       <div>
         <p class="eyebrow">Builder</p>
         <h1>${esc(p.display_name || p.handle)}</h1>
@@ -465,7 +509,7 @@ export function statsStripHTML(openItems) {
       <div><span class="ss-label">Live</span><span class="ss-value">${num(live)}</span></div>
       <div><span class="ss-label">Live pots</span><span class="ss-value">${money(pots)}</span></div>
       <div><span class="ss-label">Entries</span><span class="ss-value">${num(entries)}</span></div>
-      <div><span class="ss-label">Next deadline</span><span class="ss-value" data-countdown-short="${esc(next || '')}">${next ? timeLeft(next).replace(/ left$/, '') : '—'}</span></div>
+      <div><span class="ss-label">Closes in</span><span class="ss-value" data-countdown-short="${esc(next || '')}">${next ? timeLeft(next).replace(/ left$/, '') : '—'}</span></div>
     </div>`;
 }
 
@@ -511,6 +555,11 @@ export function tickerHTML(openItems) {
     </div>`;
 }
 
+/**
+ * A compact split-view row: title plus one meta line, with a star toggle.
+ * The category/skills sub-line is dropped here — the chips above the list
+ * already carry the category — so five or six bounties fit the first screen.
+ */
 export function splitRowHTML(b) {
   const left = new Date(b.deadline).getTime() - Date.now();
   const closing = left > 0 && left < 86400000;
@@ -518,17 +567,19 @@ export function splitRowHTML(b) {
   const ended = left <= 0;
   const fees = Number(b.entryFeesUsd);
   return `
-    <span class="srow-top">
-      <span class="srow-title">${esc(b.title)}</span>
-      ${closing && !ended ? '<span class="closing-badge">closing soon</span>' : ''}
+    <span class="srow-main">
+      <span class="srow-top">
+        <span class="srow-title">${esc(b.title)}</span>
+        ${closing && !ended ? '<span class="closing-badge">closing soon</span>' : ''}
+      </span>
+      <span class="srow-meta">
+        <b>${moneyShort(pot(b))}</b>${Number.isFinite(fees) && fees > 0 ? `<span class="srow-fees">+${moneyShort(fees)} fees</span>` : ''}
+        ${hasFee(b) ? `<span class="fee sm">${money(b.entryFeeUsd)} fee</span>` : '<span class="free sm">free</span>'}
+        <span class="srow-due ${urgent ? 'urgent' : closing ? 'soon' : ended ? 'ended' : ''}" data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span>
+        <span class="srow-n">${num(b.submissionCount)} entries</span>
+      </span>
     </span>
-    <span class="srow-sub">${esc(b.category || '')}${b.skills?.length ? ` · ${esc(b.skills.slice(0, 2).join(', '))}` : ''}</span>
-    <span class="srow-meta">
-      <b>${moneyShort(pot(b))}</b>${Number.isFinite(fees) && fees > 0 ? `<span class="srow-fees">+${moneyShort(fees)} fees</span>` : ''}
-      ${hasFee(b) ? `<span class="fee sm">${money(b.entryFeeUsd)} fee</span>` : '<span class="free sm">free</span>'}
-      <span class="srow-due ${urgent ? 'urgent' : closing ? 'soon' : ended ? 'ended' : ''}" data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span>
-      <span class="srow-n">${num(b.submissionCount)} entries</span>
-    </span>`;
+    ${starHTML(b.slug)}`;
 }
 
 export function splitShell() {
@@ -563,8 +614,10 @@ export function splitShell() {
               </select>
             </label>
           </div>
-          <input id="q" type="search" placeholder="Filter bounties…  ( / )" autocomplete="off" aria-label="Filter bounties">
-          <span id="split-meta" class="meta" aria-live="polite"></span>
+          <div class="filter-row">
+            <input id="q" type="search" placeholder="Filter bounties…  ( / )" autocomplete="off" aria-label="Filter bounties">
+            <span id="split-meta" class="meta" aria-live="polite"></span>
+          </div>
         </div>
         <div id="split-rows" class="split-rows"></div>
         <p id="split-empty" class="empty" hidden>No bounties match. Try a different filter.</p>
@@ -582,7 +635,7 @@ export function categoryChipsHTML(items, selected) {
   return chip('', 'All') + cats.map((c) => chip(c, c)).join('');
 }
 
-const splitSig = (b) => [b.title, pot(b), b.entryFeeUsd, b.entryFeesUsd, b.submissionCount, b.status, b.deadline].join('|');
+const splitSig = (b) => [b.title, pot(b), b.entryFeeUsd, b.entryFeesUsd, b.submissionCount, b.status, b.deadline, isSaved(b.slug) ? '1' : '0'].join('|');
 
 export function paintSplitList(container, items, state, selectedSlug) {
   const sorted = sortBoard(items, state.sort);
@@ -724,7 +777,7 @@ export function leaderboardPreviewHTML(entries, b, slug) {
     return `
       <li>
         <span class="pv-rank">${e.rank ?? '—'}</span>
-        <span class="ava" aria-hidden="true">${esc(initial)}${img ? `<img src="${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>
+        <span class="ava" aria-hidden="true">${esc(initial)}${img ? `<img crossorigin="anonymous" src="${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>
         <span class="pv-who"><a href="#/u/${encodeURIComponent(e.handle || '')}">@${esc(e.handle || '—')}</a>
           <span class="pv-title">${esc(e.title || '')}</span></span>
         <span class="pv-score">${winRate(v.judge)}<span class="pv-interval">${winRate(v.judge_low)}–${winRate(v.judge_high)}</span></span>
@@ -740,7 +793,7 @@ export function leaderboardPreviewHTML(entries, b, slug) {
     </section>`;
 }
 
-/** The detail pane of the split view: hero numbers, phases, rewards, preview. */
+/** The detail pane of the split view: hero numbers, phases, tabs, rewards, preview. */
 export function bountyDetailHTML(b) {
   const fees = Number(b.entryFeesUsd);
   const left = new Date(b.deadline).getTime() - Date.now();
@@ -768,16 +821,56 @@ export function bountyDetailHTML(b) {
       ${b.sponsor?.name ? `<p class="sponsor-line">Sponsor <strong>${esc(b.sponsor.name)}${b.sponsor.isVerified ? ' ✓' : ''}</strong>${b.phase?.title ? ` · ${esc(b.phase.title)}` : ''}</p>` : ''}
       ${b.skills?.length ? `<div class="skills-row"><span class="sc-label">Skills</span>${b.skills.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ')}</div>` : ''}
     </div>
+    ${phasesHTML(b)}
     <div class="actions">
       <a class="btn" href="https://make.fun/bounty/${encodeURIComponent(b.slug)}" target="_blank" rel="noopener">Enter on make.fun ↗</a>
-      <a class="btn ghost" href="#/leaderboard/${encodeURIComponent(b.slug)}">Leaderboard (${num(b.submissionCount)})</a>
+      ${starButtonHTML(b.slug, true)}
       ${kit ? `<a class="btn ghost" href="${esc(kit)}" target="_blank" rel="noopener">Kit</a>` : ''}
     </div>
-    <div class="detail-grid">
-      ${rewardsTableHTML(b)}
-      <div id="lb-preview"></div>
+    <div class="detail-tabs" role="tablist" aria-label="Bounty detail">
+      <button role="tab" data-ptab="overview" aria-selected="true">Overview</button>
+      <button role="tab" data-ptab="leaderboard" aria-selected="false">Leaderboard (${num(b.submissionCount)})</button>
     </div>
-    ${phasesHTML(b)}
-    <h2>About this bounty</h2>
-    <div class="description">${esc(b.description || b.summary || '')}</div>`;
+    <div id="pane-overview">
+      <div class="detail-grid">
+        ${rewardsTableHTML(b)}
+        <div id="lb-preview"></div>
+      </div>
+      <h2>About this bounty</h2>
+      <div class="description">${esc(b.description || b.summary || '')}</div>
+    </div>
+    <div id="pane-leaderboard" hidden></div>`;
+}
+
+/**
+ * The leaderboard inside the detail pane's Leaderboard tab: the same
+ * virtualized list as the full leaderboard page, with its own filter and
+ * view tabs, mounted only when the tab is first opened.
+ */
+export function leaderboardPaneHTML(b) {
+  return `
+    <div class="controls pane-lb-controls">
+      <input id="q" type="search" placeholder="Filter by builder or entry…  ( / )" autocomplete="off" aria-label="Filter leaderboard">
+      <div class="tabs" id="view-tabs" role="tablist" aria-label="Leaderboard view"></div>
+      <span class="meta" id="lb-count" aria-live="polite"></span>
+    </div>
+    <div id="entry-detail"></div>
+    <div class="lb-head" aria-hidden="true"><span>Rank</span><span>Prize</span><span>Builder · entry</span><span>Judge win rate</span><span class="num">Size</span></div>
+    <div id="lb-scroll" class="lb-scroll" tabindex="0" aria-label="Leaderboard entries, virtualized list">
+      <div id="lb-spacer" class="lb-spacer"><div id="lb-window" class="lb-window"></div></div>
+    </div>
+    <p class="hint">Showing <span id="lb-shown">0</span> of <span id="lb-total">0</span> entries · scroll to load more rows · click a row for detail. <a href="#/leaderboard/${encodeURIComponent(b.slug)}">Open the full leaderboard →</a></p>`;
+}
+
+// ------------------------------------------------------------ saved ----
+
+export function savedShell() {
+  return `
+    <div class="page-head">
+      <p class="eyebrow">★ Saved</p>
+      <h1>Saved bounties</h1>
+      <p class="lede">Bounties you starred, kept in this browser only. Tap the star on any bounty to add it here, or tap it again to remove it.</p>
+    </div>
+    <div id="saved-rows" class="split-rows saved-list"></div>
+    <p id="saved-empty" class="empty" hidden>No saved bounties yet. Tap the star on any bounty to keep it here.</p>`;
 }

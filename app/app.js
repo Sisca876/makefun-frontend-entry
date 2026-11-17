@@ -9,19 +9,21 @@
 //   #/bounty/<slug>        the split board with a bounty selected
 //   #/leaderboard/<slug>   the virtualized leaderboard
 //   #/u/<handle>           a builder's profile
+//   #/saved                starred bounties, kept in this browser
 //
 // window.__shotReady is false while a page loads and true once its data is on
 // screen, so a screenshot script knows when to capture.
 
 import {
-  getBounty, getLeaderboardFirst, getOpenBoard, getProfile, getRankings,
+  getBoard, getBounty, getLeaderboardFirst, getOpenBoard, getProfile, getRankings,
   getResolvedBoard, getSubmission, onStats, prefetchBounty, setViewStats, stats, viewStats,
 } from './api.js';
 import { bytes, num, timeLeft } from './fmt.js';
 import {
   boardShell, boardVisible, bountyDetailHTML, categoryChipsHTML, entryDetailHTML,
-  leaderboardPreviewHTML, leaderboardShell, mountLeaderboard, normalizeLeaderboard,
-  paintBoard, paintSplitList, profileHTML, sortBoard, splitShell, statsStripHTML, tickerHTML,
+  isSaved, leaderboardPaneHTML, leaderboardPreviewHTML, leaderboardShell, mountLeaderboard,
+  normalizeLeaderboard, onSavedChange, paintBoard, paintSplitList, profileHTML, savedShell,
+  sortBoard, splitShell, statsStripHTML, tickerHTML, toggleSaved,
 } from './views.js';
 
 const mount = document.getElementById('a');
@@ -34,10 +36,12 @@ mount.innerHTML = `
     <a class="logo" href="#/"><span class="mark">◆</span> Beacon</a>
     <nav aria-label="Main">
       <a href="#/" data-nav="board">Board</a>
+      <a href="#/saved" data-nav="saved">Saved</a>
       <span class="find">
         <input id="find-handle" type="search" placeholder="Builder @handle…" aria-label="Find a builder" autocomplete="off">
       </span>
     </nav>
+    <button class="theme-btn" id="theme-btn" aria-label="Switch to light theme" title="Theme">☾</button>
     <p class="counter" id="counter" title="API requests · 304 revalidations · bytes downloaded · bytes saved by the cache"></p>
   </header>
   <main id="view" tabindex="-1"></main>
@@ -54,6 +58,58 @@ const view = document.getElementById('view');
 const live = document.getElementById('live');
 const counterEl = document.getElementById('counter');
 const viewStatsEl = document.getElementById('view-stats');
+
+// ---- theme: dark by default, light on request, remembered in this browser.
+// The early bootstrap in m.js already set data-theme before the stylesheet
+// arrived; here the toggle takes over, and the shell's inline dark background
+// is cleared so the stylesheet's variables decide from now on.
+const THEME_KEY = 'beacon-theme';
+const themeBtn = document.getElementById('theme-btn');
+function applyTheme(theme, { persist = true } = {}) {
+  const light = theme === 'light';
+  document.documentElement.dataset.theme = light ? 'light' : 'dark';
+  document.body.style.background = '';
+  document.body.style.color = '';
+  themeBtn.textContent = light ? '☀' : '☾';
+  themeBtn.setAttribute('aria-label', light ? 'Switch to dark theme' : 'Switch to light theme');
+  if (persist) { try { localStorage.setItem(THEME_KEY, light ? 'light' : 'dark'); } catch { /* private mode */ } }
+}
+let storedTheme = 'dark';
+try { storedTheme = localStorage.getItem(THEME_KEY) || 'dark'; } catch { /* private mode */ }
+applyTheme(storedTheme, { persist: false });
+themeBtn.addEventListener('click', () => {
+  applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+});
+
+// ---- stars: one capture-phase handler owns every [data-star] toggle, so a
+// star inside a row link never also opens the row. Views repaint their lists
+// on change; this sync keeps every visible star's glyph in step at once.
+function syncStars(slug) {
+  const saved = isSaved(slug);
+  for (const el of document.querySelectorAll(`[data-star="${CSS.escape(slug)}"]`)) {
+    el.setAttribute('aria-pressed', String(saved));
+    el.classList.toggle('saved', saved);
+    el.textContent = el.classList.contains('save-btn') ? (saved ? '★ Saved' : '☆ Save') : (saved ? '★' : '☆');
+    el.setAttribute('aria-label', saved ? 'Remove from saved bounties' : 'Save this bounty');
+  }
+}
+onSavedChange((slug) => syncStars(slug));
+document.addEventListener('click', (ev) => {
+  const star = ev.target.closest?.('[data-star]');
+  if (!star) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  toggleSaved(star.dataset.star);
+}, true);
+document.addEventListener('keydown', (ev) => {
+  const star = ev.target.closest?.('[data-star]');
+  if (!star || star.tagName === 'BUTTON') return; // buttons fire click natively
+  if (ev.key === 'Enter' || ev.key === ' ') {
+    ev.preventDefault();
+    ev.stopPropagation();
+    toggleSaved(star.dataset.star);
+  }
+}, true);
 
 function paintCounter() {
   counterEl.textContent = `${stats.requests} req · ${stats.revalidated} 304 · ${bytes(stats.bytesDown)} down · ${bytes(stats.bytesSaved)} saved`;
@@ -212,7 +268,8 @@ async function showBoard() {
     refreshOpen();
     refreshResolved();
   }, 30000);
-  viewCleanup = () => clearInterval(boardTimer);
+  const unsubSaved = onSavedChange(() => paint());
+  viewCleanup = () => { clearInterval(boardTimer); unsubSaved(); };
 
   view.querySelector('#q').addEventListener('input', (ev) => { state.q = ev.target.value; selIndex = -1; paint(); });
   view.querySelector('#sort').addEventListener('change', (ev) => { state.sort = ev.target.value; paint(); });
@@ -253,7 +310,8 @@ async function showSplit(slug) {
   let detailToken = 0;
   let chipsSig = '';
   let cancelled = false;
-  viewCleanup = () => { cancelled = true; };
+  const unsubSaved = onSavedChange(() => { if (!cancelled) paint(); });
+  viewCleanup = () => { cancelled = true; unsubSaved(); };
   const items = () => [...openItems, ...resolvedItems];
 
   const paint = () => {
@@ -300,6 +358,37 @@ async function showSplit(slug) {
       detail.innerHTML = bountyDetailHTML(b);
       document.title = `${b.title} · Beacon`;
       live.textContent = b.title;
+      // Overview / Leaderboard tabs: the leaderboard mounts lazily, once, and
+      // is re-rendered when its tab is shown again (it has no size while hidden).
+      const tabs = detail.querySelectorAll('[data-ptab]');
+      const overview = detail.querySelector('#pane-overview');
+      const lbPane = detail.querySelector('#pane-leaderboard');
+      let lbCtl = null;
+      let lbLoading = false;
+      const openLbTab = async () => {
+        if (lbCtl) { lbCtl.render(); return; }
+        if (lbLoading) return;
+        lbLoading = true;
+        lbPane.innerHTML = '<p class="hint">Loading leaderboard…</p>';
+        try {
+          const data = await getLeaderboardFirst(next);
+          if (cancelled || token !== detailToken) return;
+          lbPane.innerHTML = leaderboardPaneHTML(b);
+          lbCtl = wirePaneLeaderboard(lbPane, next, data, () => !cancelled && token === detailToken);
+          lbCtl.render();
+        } catch {
+          if (!cancelled && token === detailToken) lbPane.innerHTML = '<p class="hint">Could not load the leaderboard.</p>';
+        } finally { lbLoading = false; }
+      };
+      for (const tab of tabs) {
+        tab.addEventListener('click', () => {
+          const toLb = tab.dataset.ptab === 'leaderboard';
+          for (const t of tabs) t.setAttribute('aria-selected', String(t === tab));
+          overview.hidden = toLb;
+          lbPane.hidden = !toLb;
+          if (toLb) openLbTab();
+        });
+      }
       // Leaderboard preview: the top 5, beside the rewards table.
       try {
         const lb = await getLeaderboardFirst(next);
@@ -379,12 +468,61 @@ async function showSplit(slug) {
     if (cancelled || document.visibilityState !== 'visible') return;
     await refreshOpen(); // the list, stats, and ticker refresh; the detail pane is left alone so a selection is never stolen
   }, 30000);
-  viewCleanup = () => { cancelled = true; clearInterval(timer); };
+  viewCleanup = () => { cancelled = true; unsubSaved(); clearInterval(timer); };
   live.textContent = 'Live bounty board';
   document.title = 'Beacon · make.fun bounties';
 }
 
 // ------------------------------------------------------------ leaderboard --
+
+/**
+ * The virtualized leaderboard inside a detail pane's Leaderboard tab: view
+ * tabs, filter, row detail — the same behaviour as the full page, mounted
+ * into the pane's shell. `valid()` guards every async step so a stale fetch
+ * never writes into a pane that moved on to another bounty.
+ */
+function wirePaneLeaderboard(root, slug, firstData, valid) {
+  const tabs = root.querySelector('#view-tabs');
+  const detailBox = root.querySelector('#entry-detail');
+  let current = null;
+
+  const showView = async (viewName, data) => {
+    const payload = data || await getLeaderboardFirst(slug, viewName);
+    if (!valid()) return;
+    const rows = normalizeLeaderboard(payload, viewName);
+    const views = payload.views || ['overall'];
+    const active = viewName || payload.view;
+    tabs.innerHTML = views.map((v) => `<button role="tab" data-view="${v}" aria-selected="${String(v === active)}">${v}</button>`).join('');
+    for (const tab of tabs.querySelectorAll('[data-view]')) {
+      tab.addEventListener('click', () => showView(tab.dataset.view));
+    }
+    if (current) current.setEntries(rows);
+    else {
+      current = mountLeaderboard(root, { entries: rows }, async (entry) => {
+        detailBox.innerHTML = entryDetailHTML(entry);
+        detailBox.scrollIntoView({ block: 'nearest' });
+        if (entry.compact) {
+          try {
+            const full = await getSubmission(entry.submission_id);
+            const s = full.submission ?? full;
+            if (valid() && s) {
+              detailBox.innerHTML = entryDetailHTML({
+                ...entry, ...s,
+                rank: entry.rank, prize_rank: entry.prize_rank ?? s.prize_rank,
+                values: s.values ?? entry.values,
+              });
+            }
+          } catch { /* the compact card already shows the essentials */ }
+        }
+      });
+    }
+    current.render();
+  };
+
+  root.querySelector('#q').addEventListener('input', (ev) => current?.setFilter(ev.target.value));
+  showView(null, firstData).catch(() => { /* the tab shows its loading line */ });
+  return { render() { current?.render(); } };
+}
 
 async function showLeaderboard(slug) {
   setNav('');
@@ -474,6 +612,39 @@ async function showProfile(handle) {
   }
 }
 
+// ----------------------------------------------------------------- saved --
+
+async function showSaved() {
+  setNav('saved');
+  selIndex = -1;
+  window.__shotReady = false;
+  view.innerHTML = savedShell();
+  const rowsEl = view.querySelector('#saved-rows');
+  const empty = view.querySelector('#saved-empty');
+  let items = [];
+  let cancelled = false;
+  const paint = () => {
+    const saved = sortBoard(items.filter((b) => isSaved(b.slug)), 'deadline');
+    paintSplitList(rowsEl, saved, { tab: 'all', q: '', sort: 'deadline', category: '', fee: 'any' }, '');
+    setViewStats(saved.length, saved.length);
+    empty.hidden = saved.length !== 0;
+    rowsEl.hidden = saved.length === 0;
+  };
+  const unsubSaved = onSavedChange(() => { if (!cancelled) paint(); });
+  viewCleanup = () => { cancelled = true; unsubSaved(); };
+  try {
+    const { open, resolved } = await getBoard();
+    if (cancelled) return;
+    items = [...open.map((b) => ({ ...b, status: 'open' })), ...resolved.map((b) => ({ ...b, status: 'resolved' }))];
+  } catch (err) {
+    if (!items.length) { mountError(err, showSaved); return; }
+  }
+  paint();
+  live.textContent = 'Saved bounties';
+  document.title = 'Saved bounties · Beacon';
+  window.__shotReady = true;
+}
+
 // ----------------------------------------------------------------- router --
 
 async function render() {
@@ -485,11 +656,13 @@ async function render() {
   const leaderboard = hash.match(/^#\/leaderboard\/([^/?#]+)/);
   const profile = hash.match(/^#\/u\/([^/?#]+)/);
   const board = hash === '#/board';
+  const saved = hash === '#/saved';
   try {
     if (bounty) await showSplit(decodeURIComponent(bounty[1]));
     else if (leaderboard) await showLeaderboard(decodeURIComponent(leaderboard[1]));
     else if (profile) await showProfile(decodeURIComponent(profile[1]));
     else if (board) await showBoard();
+    else if (saved) await showSaved();
     else await showSplit('');
   } catch (err) {
     mountError(err, render);
