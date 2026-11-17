@@ -706,8 +706,8 @@ export function rewardsTableHTML(b) {
   const placeLabel = (g) => (g.start === g.end ? ord(g.start) : `${ord(g.start)}–${ord(g.end)}`);
   return `
     <section class="panel" aria-label="Rewards">
-      <h2>Rewards</h2>
-      <p class="panel-note">${num(rows.length)} paid places · ${money(pot(b))} live pot</p>
+      <div class="panel-head"><h2>Rewards</h2>
+      <p class="panel-note">${num(rows.length)} paid places · ${money(pot(b))} live pot</p></div>
       <table class="rewards">
         <thead><tr><th>Place</th><th class="num">Base</th><th class="num">Fee share</th><th class="num">Pays now</th></tr></thead>
         <tbody>${groups.map((g, i) => `
@@ -742,6 +742,15 @@ export function phasesHTML(b) {
   const pos = (iso) => Math.min(100, Math.max(0, ((new Date(iso).getTime() - start) / span) * 100));
   const nowPos = pos(new Date().toISOString());
   const caption = dev ? `${esc(dev.title)}${dev.scores ? ` · ${esc(dev.scores)} scores` : ''}` : '';
+  // The exact windows, in the same short format as the labels above: the
+  // Development window (opened -> deadline) and the Final window (its own
+  // start -> results-by; the deadline when the phase carries no start).
+  const windows = [];
+  if (dev?.startsAt && dev?.endsAt) windows.push({ title: dev.title || 'Development', from: dev.startsAt, to: dev.endsAt });
+  else windows.push({ title: 'Development', from: opened, to: deadline });
+  if (final?.startsAt && final?.endsAt) windows.push({ title: final.title || 'Final', from: final.startsAt, to: final.endsAt });
+  else if (final?.endsAt) windows.push({ title: final.title || 'Final', from: deadline, to: final.endsAt });
+  const windowsLine = windows.length ? `<p class="ph-windows">${windows.map((w) => `<span><b>${esc(w.title)}</b> ${esc(dateShort(w.from))} → ${esc(dateShort(w.to))}</span>`).join('<span class="ph-wsep" aria-hidden="true">·</span>')}</p>` : '';
   // Label alignment: the first label starts at its dot, the last ends at its
   // dot, and a middle label centers on its dot — unless the next point is so
   // close that the centered label would collide with the next one, in which
@@ -761,6 +770,7 @@ export function phasesHTML(b) {
       <div class="ph-labels">
         ${points.map((p, i) => `<span class="ph-label ${align[i]}" style="left:${pos(p.at).toFixed(1)}%"><b>${esc(p.label)}</b>${dateShort(p.at)}</span>`).join('')}
       </div>
+      ${windowsLine}
       ${caption ? `<p class="ph-caption">${caption}${final ? ` · then ${esc(final.title)}` : ''}</p>` : ''}
     </section>`;
 }
@@ -818,8 +828,7 @@ export function bountyDetailHTML(b) {
         <div class="sc${closing ? ' soon' : ''}"><span class="sc-label">Time left</span><span class="sc-value" data-countdown="${esc(b.deadline)}">${timeLeft(b.deadline)}</span><span class="sc-note">${date(b.deadline)}</span></div>
         <div class="sc"><span class="sc-label">Entries</span><span class="sc-value">${num(b.submissionCount)}</span><span class="sc-note">${entriesNote}</span></div>
       </div>
-      ${b.sponsor?.name ? `<p class="sponsor-line">Sponsor <strong>${esc(b.sponsor.name)}${b.sponsor.isVerified ? ' ✓' : ''}</strong>${b.phase?.title ? ` · ${esc(b.phase.title)}` : ''}</p>` : ''}
-      ${b.skills?.length ? `<div class="skills-row"><span class="sc-label">Skills</span>${b.skills.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ')}</div>` : ''}
+      ${b.sponsor?.name || b.skills?.length ? `<div class="hero-meta">${b.sponsor?.name ? `<p class="sponsor-line">Sponsor <strong>${esc(b.sponsor.name)}${b.sponsor.isVerified ? ' ✓' : ''}</strong>${b.phase?.title ? ` · ${esc(b.phase.title)}` : ''}</p>` : ''}${b.skills?.length ? `<div class="skills-row"><span class="sc-label">Skills</span>${b.skills.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ')}</div>` : ''}</div>` : ''}
     </div>
     ${phasesHTML(b)}
     <div class="actions">
@@ -827,13 +836,13 @@ export function bountyDetailHTML(b) {
       ${starButtonHTML(b.slug, true)}
       ${kit ? `<a class="btn ghost" href="${esc(kit)}" target="_blank" rel="noopener">Kit</a>` : ''}
     </div>
+    ${rewardsTableHTML(b)}
     <div class="detail-tabs" role="tablist" aria-label="Bounty detail">
       <button role="tab" data-ptab="overview" aria-selected="true">Overview</button>
       <button role="tab" data-ptab="leaderboard" aria-selected="false">Leaderboard (${num(b.submissionCount)})</button>
     </div>
     <div id="pane-overview">
       <div class="detail-grid">
-        ${rewardsTableHTML(b)}
         <div id="lb-preview"></div>
       </div>
       <h2>About this bounty</h2>

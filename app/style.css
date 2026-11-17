@@ -161,7 +161,7 @@ main {
 }
 
 /* The split view is dense by design: less air above it. */
-main:has(.split2) { padding-top: 14px; }
+main:has(.split2) { padding-top: 10px; }
 
 footer {
   border-top: 1px solid var(--line); padding: 22px 20px 30px;
@@ -721,6 +721,14 @@ table.rewards { width: 100%; border-collapse: collapse; font-variant-numeric: ta
 .ph-label b { display: block; color: var(--text); font-size: 13px; }
 .ph-caption { margin: 6px 0 0; color: var(--faint); font-size: 13px; }
 
+/* The exact phase windows, one quiet line under the timeline labels. */
+.ph-windows {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline;
+  margin: 8px 0 0; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.ph-windows b { color: var(--dim); font-weight: 700; }
+.ph-wsep { color: var(--faint); }
+
 .preview { list-style: none; padding: 0; margin: 0; }
 .preview li { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(29, 37, 54, 0.7); }
 .preview li:last-child { border-bottom: 0; }
@@ -750,6 +758,11 @@ table.rewards { width: 100%; border-collapse: collapse; font-variant-numeric: ta
 @media (max-width: 720px) {
   .detail-grid { grid-template-columns: minmax(0, 1fr); }
   .stat-strip { grid-template-columns: 1fr 1fr; }
+  /* Narrow: the category chips get a row of their own and wrap, and the Fee
+     filter drops to a row below — no chip is ever cut mid-word by the
+     filter, and nothing scrolls sideways. Desktop is untouched. */
+  .chip-row { flex-wrap: wrap; }
+  .chip-row .chips { flex: 1 1 100%; flex-wrap: wrap; overflow: visible; }
 }
 
 /* ---- detail pane tabs: Overview / Leaderboard ---- */
@@ -776,20 +789,41 @@ table.rewards { width: 100%; border-collapse: collapse; font-variant-numeric: ta
 
 /* ---- detail pane compaction: the rewards table and preview peek into the first screen ---- */
 
-.pane-detail .hero-block { padding: 18px 22px 16px; }
-.pane-detail h1.hero { font-size: 30px; }
-.pane-detail .lede { font-size: 14.5px; line-height: 1.55; }
+.pane-detail .crumbs { margin-bottom: 4px; }
+.pane-detail .hero-block { padding: 12px 22px 8px; }
+.pane-detail h1.hero { font-size: 26px; }
+.pane-detail .hero-block .eyebrow { margin-bottom: 4px; }
+.pane-detail .lede { font-size: 14px; line-height: 1.45; }
 /* The summary is capped at two lines here; the full text sits below in About. */
 .pane-detail .hero-block .lede {
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.pane-detail .stat-cards { margin: 14px 0 4px; gap: 10px; }
-.pane-detail .sc { padding: 11px 14px; }
-.pane-detail .sc-value { font-size: 19px; }
-.pane-detail .sponsor-line { margin: 12px 0 0; }
-.pane-detail .skills-row { margin: 10px 0 2px; }
-.pane-detail .phases { padding: 20px 20px 10px; margin: 12px 0 2px; }
-.pane-detail .ph-labels { height: 40px; }
-.pane-detail .actions { margin: 12px 0; }
+.pane-detail .stat-cards { margin: 8px 0 4px; gap: 10px; }
+.pane-detail .sc { padding: 8px 14px; }
+.pane-detail .sc-value { font-size: 18px; }
+.pane-detail .sc-label { margin-bottom: 4px; }
+.pane-detail .sc-note { margin-top: 2px; }
+/* Sponsor and skills share one row in the pane: same content, one line. */
+.pane-detail .hero-meta { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin: 8px 0 2px; }
+.pane-detail .hero-meta .sponsor-line { margin: 0; white-space: nowrap; }
+.pane-detail .hero-meta .skills-row { margin: 0; }
+.pane-detail .phases { padding: 14px 20px 6px; margin: 8px 0 2px; }
+.pane-detail .ph-labels { height: 36px; margin-top: 8px; }
+.pane-detail .ph-windows { margin-top: 4px; }
+.pane-detail .ph-caption { margin-top: 2px; }
+.pane-detail .actions { margin: 8px 0; }
+.pane-detail .actions .btn { padding: 8px 16px; }
 .pane-detail h2 { margin-top: 24px; }
+.pane-detail .detail-tabs { margin: 12px 0 14px; }
+.pane-detail .panel { padding: 12px 18px; }
+/* The rewards heading and its note share one row, so the table starts higher. */
+.panel-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 0 8px; }
+.panel-head h2 { margin: 0; }
+.panel-head .panel-note { margin: 0; }
+/* The rewards table itself is tightened in the pane: same rows, less air. */
+.pane-detail .rewards th { padding: 3px 8px 5px 0; }
+.pane-detail .rewards td { padding: 4px 8px 4px 0; }
+.pane-detail .rw-bar { margin-top: 2px; }
+/* The preview now stands alone in the overview grid: full width. */
+.detail-grid > :only-child { grid-column: 1 / -1; }
 .ss-value { white-space: nowrap; }
